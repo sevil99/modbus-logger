@@ -103,6 +103,8 @@ class CommandDefinition:
     key: int
     arg: str
     description: str
+    address: int | None = None
+    write: str = "packet"
 
 
 @dataclass(frozen=True)
@@ -112,6 +114,9 @@ class BitDefinition:
     mask_hex: str
     symbol: str
     description: str
+    table: str = ""
+    register_address: int | None = None
+    register_symbol: str = ""
 
 
 class MdchRegisterMap:
@@ -216,6 +221,8 @@ def _command_from_payload(item: dict[str, Any]) -> CommandDefinition:
         key=key_value,
         arg=str(item.get("arg") or ""),
         description=str(item.get("description") or ""),
+        address=None if item.get("address") in (None, "") else int(item.get("address")),
+        write=str(item.get("write") or "packet"),
     )
 
 
@@ -226,6 +233,9 @@ def _bit_from_payload(item: dict[str, Any]) -> BitDefinition:
         mask_hex=str(item.get("mask_hex") or ""),
         symbol=str(item["symbol"]),
         description=str(item.get("description") or ""),
+        table=str(item.get("table") or ""),
+        register_address=None if item.get("register_address") in (None, "") else int(item.get("register_address")),
+        register_symbol=str(item.get("register_symbol") or ""),
     )
 
 

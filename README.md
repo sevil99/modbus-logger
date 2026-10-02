@@ -38,8 +38,7 @@ not 30001/40001 display addresses.
 
 The default map is `templates/mdch_v2.json`, generated from:
 
-- `МДЧ-1 Перечень регистров Modbus v2.xlsx`
-- `МДЧ-1 Перечень конфигурируемых параметров v2.xlsx`
+- `перечень регистров МДЧ v2.xlsx`
 
 Important protocol assumptions in this software:
 
@@ -48,8 +47,10 @@ Important protocol assumptions in this software:
 - `FC06` writes single U16 draft parameters.
 - `FC16` writes U32/F32 draft parameters and the command packet.
 - Float values use Modbus word order CD AB.
-- Active Holding mirrors are read-only and located at draft address +1000.
-- Commands are written only as `FC16 start=0 count=4`: `CMD, ARG, KEY, SEQ`.
+- Event and diagnostic bits from the Input registers are shown on the Events
+  tab and highlighted when active.
+- Commands from the map are shown as buttons. The current v2 map writes the
+  command code to `Holding 0`.
 
 ## Files
 

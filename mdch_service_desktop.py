@@ -165,6 +165,7 @@ class MdchServiceApp:
         self.latest_holding: dict[str, Any] = {}
         self.previous_masks: dict[str, int] = {}
         self.bit_definitions_by_symbol: dict[str, list[Any]] = {}
+        self.event_status_items: dict[tuple[str, int], str] = {}
         self.event_row_count = 0
         self.command_seq = 0
 
@@ -276,6 +277,23 @@ class MdchServiceApp:
         toolbar = ttk.Frame(self.event_tab)
         toolbar.pack(fill=tk.X, padx=6, pady=6)
         ttk.Button(toolbar, text="Очистить журнал", command=self.clear_event_log).pack(side=tk.LEFT, padx=3)
+
+        status_columns = ("register", "bit", "state", "symbol", "description")
+        self.event_status_tree = ttk.Treeview(self.event_tab, columns=status_columns, show="headings", height=13)
+        status_headings = {
+            "register": ("Регистр", 150),
+            "bit": ("Бит", 50),
+            "state": ("Состояние", 90),
+            "symbol": ("Обозначение", 150),
+            "description": ("Описание", 720),
+        }
+        for column, (title, width) in status_headings.items():
+            self.event_status_tree.heading(column, text=title)
+            self.event_status_tree.column(column, width=width, anchor=tk.W)
+        self.event_status_tree.tag_configure("active", background="#fee2e2", foreground="#991b1b")
+        self.event_status_tree.tag_configure("inactive", background="#f8fafc", foreground="#334155")
+        self.event_status_tree.pack(fill=tk.BOTH, expand=True, padx=6, pady=(0, 6))
+
         columns = ("time", "register", "bit", "state", "symbol", "description")
         self.event_tree = ttk.Treeview(self.event_tab, columns=columns, show="headings")
         headings = {
@@ -296,10 +314,14 @@ class MdchServiceApp:
     def _build_command_tab(self) -> None:
         left = ttk.Frame(self.command_tab, padding=8)
         left.pack(side=tk.LEFT, fill=tk.Y)
+        ttk.Label(left, text="Быстрые команды").pack(anchor=tk.W)
+        self.command_button_frame = ttk.Frame(left)
+        self.command_button_frame.pack(anchor=tk.W, fill=tk.X, pady=(3, 12))
         ttk.Label(left, text="Команда").pack(anchor=tk.W)
         self.command_var = tk.StringVar(value="VALIDATE")
         names = [command.name for command in self.register_map.commands]
-        ttk.Combobox(left, textvariable=self.command_var, values=names, width=24, state="readonly").pack(anchor=tk.W, pady=3)
+        self.command_combo = ttk.Combobox(left, textvariable=self.command_var, values=names, width=24, state="readonly")
+        self.command_combo.pack(anchor=tk.W, pady=3)
         ttk.Label(left, text="ARG").pack(anchor=tk.W)
         self.command_arg_var = tk.StringVar(value="0")
         ttk.Entry(left, textvariable=self.command_arg_var, width=24).pack(anchor=tk.W, pady=3)
@@ -309,6 +331,8 @@ class MdchServiceApp:
 
     def _load_map_into_tables(self) -> None:
         self._rebuild_bit_index()
+        self._rebuild_event_status_table()
+        self._rebuild_command_buttons()
         self.measure_tree.delete(*self.measure_tree.get_children())
         for field in self.register_map.input_fields:
             self.measure_tree.insert("", tk.END, iid=f"input:{field.symbol}", values=(field.address, field.symbol, "", field.unit, field.name))
@@ -341,10 +365,12 @@ class MdchServiceApp:
             messagebox.showerror("Подключение", str(error))
 
     def disconnect(self) -> None:
-        if self.worker is not None:
-            self.worker.stop()
+        worker = self.worker
+        if worker is not None:
+            worker.stop()
+            worker.join(timeout=1.5)
             self.worker = None
-        if self.client is not None:
+        if self.client is not None and (worker is None or not worker.is_alive()):
             self.client.close()
             self.client = None
         self.connect_button.configure(state=tk.NORMAL)
@@ -424,9 +450,7 @@ class MdchServiceApp:
         try:
             command = self.register_map.command_by_name(self.command_var.get())
             arg = int(self.command_arg_var.get(), 0)
-            self.command_seq = 1 if self.command_seq >= 65535 else self.command_seq + 1
-            self.client.write_multiple_registers(0, [command.code, arg, command.key, self.command_seq])
-            self._append_command_log(f"SEQ={self.command_seq} {command.name} ARG=0x{arg:04X}")
+            self._send_command(command, arg)
         except Exception as error:
             messagebox.showerror("Команда", str(error))
 
@@ -522,14 +546,85 @@ class MdchServiceApp:
     def _rebuild_bit_index(self) -> None:
         result: dict[str, list[Any]] = {}
         for bit in self.register_map.bits:
-            register_text = bit.register.upper()
-            if register_text.startswith("EVENT"):
-                symbols = ("EVENT_ACTIVE", "EVENT_LATCHED", "EVENT_UNACK")
+            if bit.register_symbol:
+                symbols = (bit.register_symbol,)
             else:
-                symbols = [symbol for symbol in BIT_MASK_SYMBOLS if symbol in register_text]
+                register_text = bit.register.upper()
+                if register_text.startswith("EVENT"):
+                    symbols = ("EVENT_ACTIVE", "EVENT_LATCHED", "EVENT_UNACK")
+                else:
+                    symbols = [symbol for symbol in BIT_MASK_SYMBOLS if symbol in register_text]
             for symbol in symbols:
                 result.setdefault(symbol, []).append(bit)
         self.bit_definitions_by_symbol = result
+
+    def _rebuild_event_status_table(self) -> None:
+        self.event_status_items.clear()
+        self.event_status_tree.delete(*self.event_status_tree.get_children())
+        for register_symbol in sorted(self.bit_definitions_by_symbol):
+            bits = sorted(self.bit_definitions_by_symbol[register_symbol], key=lambda item: item.bit)
+            for bit in bits:
+                item_id = f"status:{register_symbol}:{bit.bit}"
+                self.event_status_items[(register_symbol, bit.bit)] = item_id
+                register_label = register_symbol
+                if bit.register_address is not None:
+                    register_label = f"{register_symbol} PDU {bit.register_address}"
+                self.event_status_tree.insert(
+                    "",
+                    tk.END,
+                    iid=item_id,
+                    values=(register_label, bit.bit, "0", bit.symbol, bit.description),
+                    tags=("inactive",),
+                )
+
+    def _rebuild_command_buttons(self) -> None:
+        for child in self.command_button_frame.winfo_children():
+            child.destroy()
+        names = [command.name for command in self.register_map.commands]
+        self.command_combo.configure(values=names)
+        if names:
+            self.command_var.set(names[0])
+        else:
+            self.command_var.set("")
+        for command in self.register_map.commands:
+            button = ttk.Button(
+                self.command_button_frame,
+                text=command.name,
+                command=lambda selected=command: self._send_command_from_button(selected),
+            )
+            button.pack(anchor=tk.W, fill=tk.X, pady=2)
+
+    def _send_command_from_button(self, command: Any) -> None:
+        if self.client is None:
+            messagebox.showinfo("Команда", "Сначала подключитесь")
+            return
+        try:
+            self._send_command(command, 0)
+        except Exception as error:
+            messagebox.showerror("Команда", str(error))
+
+    def _send_command(self, command: Any, arg: int = 0) -> None:
+        if command.write in {"fc16_register", "single_register"} and command.address is not None:
+            self.client.write_multiple_registers(command.address, [command.code])
+            self._append_command_log(f"{command.name}: FC16 HR{command.address}=0x{command.code:04X}")
+            try:
+                delay_ms = max(100, int(self.poll_var.get() or 0))
+            except ValueError:
+                delay_ms = 500
+            self.root.after(delay_ms, lambda address=command.address: self._clear_command_register(address))
+            return
+        self.command_seq = 1 if self.command_seq >= 65535 else self.command_seq + 1
+        self.client.write_multiple_registers(0, [command.code, arg, command.key, self.command_seq])
+        self._append_command_log(f"SEQ={self.command_seq} {command.name} ARG=0x{arg:04X}")
+
+    def _clear_command_register(self, address: int) -> None:
+        if self.client is None:
+            return
+        try:
+            self.client.write_multiple_registers(address, [0])
+            self._append_command_log(f"Сброс команды: FC16 HR{address}=0x0000")
+        except Exception as error:
+            self._append_command_log(f"Ошибка сброса команды HR{address}: {error}")
 
     def _remember_bit_events(self, values: dict[str, Any]) -> None:
         for symbol, bits in self.bit_definitions_by_symbol.items():
@@ -541,6 +636,8 @@ class MdchServiceApp:
                 continue
             previous = self.previous_masks.get(symbol)
             self.previous_masks[symbol] = current
+            for bit in bits:
+                self._set_event_status(symbol, bit, bool(current & (1 << bit.bit)))
             if previous is None:
                 continue
             changed = previous ^ current
@@ -552,6 +649,13 @@ class MdchServiceApp:
                     continue
                 is_set = bool(current & mask)
                 self._append_event_row(symbol, bit.bit, bit.symbol, bit.description, is_set)
+
+    def _set_event_status(self, register_symbol: str, bit: Any, is_set: bool) -> None:
+        item_id = self.event_status_items.get((register_symbol, bit.bit))
+        if not item_id:
+            return
+        self.event_status_tree.set(item_id, "state", "1" if is_set else "0")
+        self.event_status_tree.item(item_id, tags=("active" if is_set else "inactive",))
 
     def _append_event_row(self, register: str, bit: int, symbol: str, description: str, is_set: bool) -> None:
         self.event_row_count += 1

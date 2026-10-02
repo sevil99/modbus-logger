@@ -66,39 +66,46 @@ class StandardModbusClient(ModbusClient):
     def __init__(self, transport: "ModbusTransport", slave_id: int):
         self.transport = transport
         self.slave_id = int(slave_id)
+        self._io_lock = threading.RLock()
 
     def connect(self) -> None:
-        self.transport.connect()
+        with self._io_lock:
+            self.transport.connect()
 
     def close(self) -> None:
-        self.transport.close()
+        with self._io_lock:
+            self.transport.close()
 
     def read_input_registers(self, address: int, count: int) -> list[int]:
-        return self._read_registers(FC_READ_INPUT, address, count)
+        with self._io_lock:
+            return self._read_registers(FC_READ_INPUT, address, count)
 
     def read_holding_registers(self, address: int, count: int) -> list[int]:
-        return self._read_registers(FC_READ_HOLDING, address, count)
+        with self._io_lock:
+            return self._read_registers(FC_READ_HOLDING, address, count)
 
     def write_single_register(self, address: int, value: int) -> None:
-        pdu = bytes([FC_WRITE_SINGLE]) + int(address).to_bytes(2, "big") + int(value & 0xFFFF).to_bytes(2, "big")
-        response = self._request(pdu)
-        if response != pdu:
-            raise ModbusError("Unexpected FC06 response")
+        with self._io_lock:
+            pdu = bytes([FC_WRITE_SINGLE]) + int(address).to_bytes(2, "big") + int(value & 0xFFFF).to_bytes(2, "big")
+            response = self._request(pdu)
+            if response != pdu:
+                raise ModbusError("Unexpected FC06 response")
 
     def write_multiple_registers(self, address: int, values: list[int]) -> None:
-        values = [int(value) & 0xFFFF for value in values]
-        payload = b"".join(value.to_bytes(2, "big") for value in values)
-        pdu = (
-            bytes([FC_WRITE_MULTIPLE])
-            + int(address).to_bytes(2, "big")
-            + len(values).to_bytes(2, "big")
-            + bytes([len(payload)])
-            + payload
-        )
-        response = self._request(pdu)
-        expected = bytes([FC_WRITE_MULTIPLE]) + int(address).to_bytes(2, "big") + len(values).to_bytes(2, "big")
-        if response != expected:
-            raise ModbusError("Unexpected FC16 response")
+        with self._io_lock:
+            values = [int(value) & 0xFFFF for value in values]
+            payload = b"".join(value.to_bytes(2, "big") for value in values)
+            pdu = (
+                bytes([FC_WRITE_MULTIPLE])
+                + int(address).to_bytes(2, "big")
+                + len(values).to_bytes(2, "big")
+                + bytes([len(payload)])
+                + payload
+            )
+            response = self._request(pdu)
+            expected = bytes([FC_WRITE_MULTIPLE]) + int(address).to_bytes(2, "big") + len(values).to_bytes(2, "big")
+            if response != expected:
+                raise ModbusError("Unexpected FC16 response")
 
     def _read_registers(self, function_code: int, address: int, count: int) -> list[int]:
         pdu = bytes([function_code]) + int(address).to_bytes(2, "big") + int(count).to_bytes(2, "big")
@@ -195,11 +202,14 @@ class RtuTransport(ModbusTransport):
         )
 
     def close(self) -> None:
-        if self._serial is not None:
-            try:
-                self._serial.close()
-            finally:
-                self._serial = None
+        serial_port = self._serial
+        self._serial = None
+        if serial_port is None:
+            return
+        try:
+            serial_port.close()
+        except AttributeError:
+            pass
 
     def transact(self, slave_id: int, pdu: bytes) -> bytes:
         if self._serial is None:
@@ -243,6 +253,7 @@ class DemoMdchClient(ModbusClient):
         self._active_rev = 1
         self._saved_rev = 1
         self._pulse_count = 0
+        self._pending_event_reset = 0
         self._init_registers()
 
     def connect(self) -> None:
@@ -267,6 +278,9 @@ class DemoMdchClient(ModbusClient):
         with self._lock:
             if address == 0 and len(values) == 4:
                 self._execute_command(values)
+                return
+            if address == 0 and len(values) == 1:
+                self._execute_single_register_command(values[0])
                 return
             for offset, value in enumerate(values):
                 current = address + offset
@@ -306,8 +320,15 @@ class DemoMdchClient(ModbusClient):
         self._set_input_symbol("FREQ_HZ", frequency)
         self._set_input_symbol("SPEED_RPM", speed)
         self._set_input_symbol("MEAS_FLAGS", 0x0001)
+        previous_latched = int(self._read_input_symbol("EVENT_LATCHED") or 0)
+        event_latched = previous_latched | event_active
+        if self._pending_event_reset:
+            reset_now = self._pending_event_reset & ~event_active
+            event_latched &= ~reset_now
+            self._pending_event_reset &= event_active
+
         self._set_input_symbol("EVENT_ACTIVE", event_active)
-        self._set_input_symbol("EVENT_LATCHED", event_active)
+        self._set_input_symbol("EVENT_LATCHED", event_latched)
         self._set_input_symbol("EVENT_UNACK", event_active)
         self._set_input_symbol("IO_STATUS", 0x10C0)
         self._set_input_symbol("MODULE_STATE", 3 if event_active & ~0x0006 else 2 if event_active else 1)
@@ -360,6 +381,18 @@ class DemoMdchClient(ModbusClient):
         self._set_input_symbol("LAST_CMD_CODE", cmd)
         self._set_input_symbol("CMD_RESULT", result)
         self._set_input_symbol("CMD_DETAIL", detail)
+
+    def _execute_single_register_command(self, value: int) -> None:
+        command_code = int(value) & 0xFFFF
+        if command_code & 0x0001:
+            active = int(self._read_input_symbol("EVENT_ACTIVE") or 0)
+            latched = int(self._read_input_symbol("EVENT_LATCHED") or 0)
+            self._set_input_symbol("EVENT_LATCHED", latched & active)
+            self._set_input_symbol("EVENT_UNACK", 0)
+            self._pending_event_reset = active
+        if command_code & 0x0002:
+            self._set_input_symbol("IO_STATUS", self._read_input_symbol("IO_STATUS") or 0)
+        self._holding[0] = command_code
 
     def _copy_draft_to_active(self) -> None:
         for field in self.map.active_fields:
