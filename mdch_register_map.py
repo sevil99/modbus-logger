@@ -92,7 +92,7 @@ class RegisterField:
         if value is None:
             return ""
         if isinstance(value, float):
-            return f"{value:.6g}"
+            return f"{value:.2f}"
         return str(value)
 
 

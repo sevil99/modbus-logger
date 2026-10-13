@@ -91,8 +91,11 @@ class SignalChart(ttk.Frame):
     def __init__(self, parent: tk.Widget):
         super().__init__(parent)
         self.values: deque[tuple[float, float]] = deque(maxlen=1200)
+        self.cursor_x: int | None = None
         self.canvas = tk.Canvas(self, height=210, background="#ffffff", highlightthickness=1, highlightbackground="#cbd5e1")
         self.canvas.pack(fill=tk.BOTH, expand=True)
+        self.canvas.bind("<Motion>", self._on_cursor_motion)
+        self.canvas.bind("<Leave>", self._on_cursor_leave)
 
     def append(self, timestamp: float, value: float) -> None:
         self.values.append((timestamp, value))
@@ -132,8 +135,53 @@ class SignalChart(ttk.Frame):
         canvas.create_line(*coords, fill="#2563eb", width=2)
         canvas.create_text(left, bottom + 8, anchor="nw", text=time.strftime("%H:%M:%S", time.localtime(start)), fill="#64748b", font=("Segoe UI", 8))
         canvas.create_text(right, bottom + 8, anchor="ne", text=time.strftime("%H:%M:%S", time.localtime(points[-1][0])), fill="#64748b", font=("Segoe UI", 8))
-        canvas.create_text(6, top, anchor="nw", text=f"{maximum:.1f}", fill="#64748b", font=("Segoe UI", 8))
-        canvas.create_text(6, bottom - 12, anchor="nw", text=f"{minimum:.1f}", fill="#64748b", font=("Segoe UI", 8))
+        canvas.create_text(6, top, anchor="nw", text=f"{maximum:.2f}", fill="#64748b", font=("Segoe UI", 8))
+        canvas.create_text(6, bottom - 12, anchor="nw", text=f"{minimum:.2f}", fill="#64748b", font=("Segoe UI", 8))
+        self._draw_cursor(points, start, span, minimum, maximum, left, top, right, bottom)
+
+    def _on_cursor_motion(self, event: tk.Event) -> None:
+        self.cursor_x = int(event.x)
+        self.draw()
+
+    def _on_cursor_leave(self, _event: tk.Event) -> None:
+        self.cursor_x = None
+        self.draw()
+
+    def _draw_cursor(
+        self,
+        points: list[tuple[float, float]],
+        start: float,
+        span: float,
+        minimum: float,
+        maximum: float,
+        left: int,
+        top: int,
+        right: int,
+        bottom: int,
+    ) -> None:
+        if self.cursor_x is None or self.cursor_x < left or self.cursor_x > right:
+            return
+        canvas = self.canvas
+        target_ts = start + (self.cursor_x - left) / max(1, right - left) * span
+        ts, value = min(points, key=lambda point: abs(point[0] - target_ts))
+        x = left + (ts - start) / span * (right - left)
+        y = bottom - (value - minimum) / (maximum - minimum) * (bottom - top)
+        canvas.create_line(x, top, x, bottom, fill="#94a3b8", dash=(3, 2))
+        canvas.create_oval(x - 3, y - 3, x + 3, y + 3, fill="#1d4ed8", outline="#ffffff")
+
+        label = f"{time.strftime('%H:%M:%S', time.localtime(ts))}  {value:.3f}"
+        text_x = x + 8
+        text_y = max(top + 6, y - 24)
+        anchor = "nw"
+        if text_x + 136 > right:
+            text_x = x - 8
+            anchor = "ne"
+        text_id = canvas.create_text(text_x, text_y, anchor=anchor, text=label, fill="#0f172a", font=("Segoe UI", 8))
+        bbox = canvas.bbox(text_id)
+        if bbox is None:
+            return
+        canvas.create_rectangle(bbox[0] - 5, bbox[1] - 3, bbox[2] + 5, bbox[3] + 3, fill="#ffffff", outline="#cbd5e1")
+        canvas.tag_raise(text_id)
 
 
 class MdchServiceApp:

@@ -226,7 +226,7 @@ def _row_from_payload(record_number: int, session_started_at: datetime, payload:
 
 def _format_value(value: Any) -> str:
     if isinstance(value, float):
-        return f"{value:.6g}"
+        return f"{value:.2f}"
     return str(value)
 
 
